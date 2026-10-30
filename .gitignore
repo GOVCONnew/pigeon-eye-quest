@@ -1,0 +1,7 @@
+godot/.godot/
+godot/android/
+build/
+android-plugin/.gradle/
+android-plugin/**/build/
+android-plugin/local.properties
+*.keystore

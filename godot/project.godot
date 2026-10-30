@@ -1,0 +1,26 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+config/name="Pigeon Eye Quest"
+config/version="0.1.0"
+config/description="PIGEON EYE AR HUD for Meta Quest 3 (passthrough)."
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.4", "Mobile")
+config/icon="res://icon.png"
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=960
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/pigeonvision/plugin.cfg")
+
+[rendering]
+renderer/rendering_method="mobile"
+textures/vram_compression/import_etc2_astc=true
+
+[xr]
+openxr/enabled=true
+openxr/foveation_level=2
+shaders/enabled=true
