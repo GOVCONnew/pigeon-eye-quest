@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,"><title>PIGEON EYE · Quest WebXR HUD (fallback)</title>
+<style>
+body{margin:0;background:#000;color:#9ACD32;font:16px/1.4 ui-monospace,Menlo,monospace;display:flex;flex-direction:column;align-items:center;gap:12px;padding:20px}
+button{background:#000;color:#9ACD32;border:2px solid #9ACD32;font:bold 20px ui-monospace,monospace;padding:14px 28px;border-radius:8px}
+canvas#preview{max-width:96vw;border:1px solid #33410f}
+p{max-width:720px;color:#7fa62a}
+</style></head><body>
+<h2>PIGEON EYE · QUEST HUD <small>(WebXR fallback v0.1.0)</small></h2>
+<button id="go">ENTER AR</button>
+<p>Passthrough HUD with a compass tape and a heading-up minimap (your path, waypoints, cleared rooms). There's <b>no camera detection</b> here because browsers can't read the Quest camera; use the APK for that.<br>
+Controls: <b>Trigger</b> = waypoint, <b>Grip</b> = MARK CLEAR, <b>A/X</b> = SET NORTH (face north first).<br>
+Everything runs locally in the browser and nothing is uploaded.</p>
+<canvas id="preview" width="1024" height="768"></canvas>
+<script type="module">
+import * as THREE from './vendor/three.module.min.js';
+const G = '#9ACD32', AMB = '#FFB000', RED = '#FF4040';
+const hud = document.createElement('canvas'); hud.width = 1024; hud.height = 768; const g = hud.getContext('2d');
+const pv = document.getElementById('preview').getContext('2d');
+let northOff = +(localStorage.peqNorth || 0), path = [], wps = [], rooms = [], toast = '', toastT = 0, yawDemo = 0;
+const wrap = d => ((d % 360) + 360) % 360, diff = (a, b) => ((b - a + 540) % 360) - 180;
+const CARD = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'], card = d => CARD[Math.round(wrap(d) / 45) % 8];
+function say(s) { toast = s; toastT = performance.now() + 2000; }
+function draw(hdg, me) {
+  const W = hud.width, H = hud.height; g.clearRect(0, 0, W, H); g.lineWidth = 2; g.font = 'bold 34px monospace'; g.textAlign = 'center';
+  g.fillStyle = G; g.fillText(String(Math.round(wrap(hdg)) % 360).padStart(3, '0') + '° ' + card(hdg), W / 2, 44);
+  const cx = W / 2, y = 104, span = 90, px = W * 0.6 / span; g.strokeStyle = G; g.font = '18px monospace';
+  for (let d = Math.floor((hdg - 45) / 5) * 5; d <= hdg + 45; d += 5) { const x = cx + diff(hdg, d) * px, dd = wrap(d); g.beginPath(); g.moveTo(x, y); g.lineTo(x, y - (dd % 15 ? 8 : 18)); g.stroke(); if (dd % 45 === 0) g.fillText(card(dd), x, y - 24); else if (dd % 15 === 0) g.fillText(dd, x, y - 24); }
+  g.fillStyle = RED; g.beginPath(); g.moveTo(cx, y + 2); g.lineTo(cx - 8, y + 18); g.lineTo(cx + 8, y + 18); g.fill();
+  g.textAlign = 'left'; g.fillStyle = AMB; g.font = '18px monospace'; g.fillText('WEBXR FALLBACK · NO CAMERA DETECTION · HDG ' + (localStorage.peqNorth ? 'NORTH SET' : 'RELATIVE'), 20, 150);
+  // minimap (heading-up, 20 m)
+  const mc = { x: 150, y: H - 150 }, R = 120, sc = R / 20, rot = -hdg * Math.PI / 180;
+  g.fillStyle = 'rgba(0,0,0,.55)'; g.beginPath(); g.arc(mc.x, mc.y, R, 0, 7); g.fill(); g.strokeStyle = G; g.beginPath(); g.arc(mc.x, mc.y, R, 0, 7); g.stroke();
+  const P = p => { let dx = (p.x - me.x) * sc, dy = -(p.y - me.y) * sc; const c = Math.cos(rot), s = Math.sin(rot); let x = dx * c - dy * s, yy = dx * s + dy * c; const l = Math.hypot(x, yy); if (l > R - 6) { x *= (R - 6) / l; yy *= (R - 6) / l; } return { x: mc.x + x, y: mc.y + yy }; };
+  g.strokeStyle = 'rgba(154,205,50,.5)'; g.beginPath(); path.forEach((p, i) => { const q = P(p); i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); }); g.stroke();
+  wps.forEach(w => { const q = P(w); g.fillStyle = AMB; g.fillRect(q.x - 5, q.y - 5, 10, 10); g.fillText(w.n, q.x + 8, q.y + 5); });
+  rooms.forEach(r => { const q = P(r); g.strokeStyle = G; g.strokeRect(q.x - 6, q.y - 6, 12, 12); g.fillStyle = G; g.fillText(r.n, q.x + 8, q.y + 5); });
+  const n = { x: mc.x + Math.sin(rot) * (R - 16), y: mc.y - Math.cos(rot) * (R - 16) }; g.fillStyle = RED; g.fillText('N', n.x - 6, n.y + 6);
+  g.fillStyle = G; g.beginPath(); g.moveTo(mc.x, mc.y - 10); g.lineTo(mc.x + 7, mc.y + 8); g.lineTo(mc.x - 7, mc.y + 8); g.fill();
+  if (performance.now() < toastT) { g.font = 'bold 26px monospace'; g.textAlign = 'center'; g.fillStyle = 'rgba(0,0,0,.8)'; g.fillRect(W / 2 - 220, H * 0.62, 440, 44); g.fillStyle = G; g.fillText(toast, W / 2, H * 0.62 + 31); }
+  g.strokeStyle = 'rgba(154,205,50,.6)'; g.beginPath(); g.moveTo(W / 2 - 14, H / 2); g.lineTo(W / 2 + 14, H / 2); g.moveTo(W / 2, H / 2 - 14); g.lineTo(W / 2, H / 2 + 14); g.stroke();
+}
+// three.js scene: transparent background → Quest Browser shows passthrough in immersive-ar
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }); renderer.xr.enabled = true; renderer.setClearColor(0, 0);
+const scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, 4 / 3, 0.05, 50); scene.add(camera);
+const tex = new THREE.CanvasTexture(hud);
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.05), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false }));
+quad.position.set(0, 0, -1); quad.renderOrder = 10; camera.add(quad);
+const yawOf = q => { const f = new THREE.Vector3(0, 0, -1).applyQuaternion(q); return Math.atan2(f.x, -f.z) * 180 / Math.PI; };
+const toMap = (p) => { const a = -northOff * Math.PI / 180, x = p.x, y = -p.z; return { x: x * Math.cos(a) - y * Math.sin(a), y: x * Math.sin(a) + y * Math.cos(a) }; };
+function act(kind) {
+  const pos = new THREE.Vector3(), q = new THREE.Quaternion(); camera.getWorldPosition(pos); camera.getWorldQuaternion(q);
+  if (kind === 'wp') { const f = new THREE.Vector3(0, 0, -1).applyQuaternion(q); f.y = 0; f.normalize().multiplyScalar(3); const m = toMap(pos.clone().add(f)); wps.push({ ...m, raw: pos.clone().add(f), n: 'WP' + (wps.length + 1) }); say('WAYPOINT WP' + wps.length); }
+  if (kind === 'clear') { rooms.push({ ...toMap(pos), raw: pos.clone(), n: 'Room ' + (rooms.length + 1) }); say('MARK CLEAR · Room ' + rooms.length); }
+  if (kind === 'north') { northOff = -yawOf(q); localStorage.peqNorth = northOff; wps.forEach(w => Object.assign(w, toMap(w.raw))); rooms.forEach(r => Object.assign(r, toMap(r.raw))); path = []; say('NORTH SET'); }
+}
+renderer.xr.addEventListener('sessionstart', () => {
+  const s = renderer.xr.getSession();
+  s.addEventListener('select', () => act('wp')); s.addEventListener('squeeze', () => act('clear'));
+});
+let lastBtn = false;
+renderer.setAnimationLoop(() => {
+  const xr = renderer.xr.isPresenting, cam = xr ? renderer.xr.getCamera() : camera;
+  if (!xr) { yawDemo += 0.2; camera.rotation.set(0, -yawDemo * Math.PI / 180, 0); }
+  const q = new THREE.Quaternion(), pos = new THREE.Vector3(); cam.getWorldQuaternion(q); cam.getWorldPosition(pos);
+  if (xr) { camera.position.copy(pos); camera.quaternion.copy(q); for (const src of renderer.xr.getSession().inputSources) { const b = src.gamepad && src.gamepad.buttons[4]; if (b && b.pressed && !lastBtn) act('north'); lastBtn = !!(b && b.pressed); } }
+  const me = toMap(pos), last = path[path.length - 1]; if (!last || Math.hypot(me.x - last.x, me.y - last.y) > 0.5) path.push(me);
+  draw(wrap(yawOf(q) + northOff), me); tex.needsUpdate = true;
+  if (xr) renderer.render(scene, camera); else { pv.fillStyle = '#0b0f08'; pv.fillRect(0, 0, 1024, 768); pv.drawImage(hud, 0, 0); }
+});
+document.getElementById('go').onclick = async () => {
+  if (!navigator.xr || !(await navigator.xr.isSessionSupported('immersive-ar'))) { say('immersive-ar not supported here'); return; }
+  const s = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'] });
+  renderer.xr.setReferenceSpaceType('local-floor'); await renderer.xr.setSession(s);
+};
+window.__peq = { act, state: () => ({ wps: wps.length, rooms: rooms.length, path: path.length, northOff }) };
+</script></body></html>
