@@ -3,7 +3,7 @@ config_version=5
 
 [application]
 config/name="Pigeon Eye Quest"
-config/version="0.1.1"
+config/version="0.1.2"
 config/description="PIGEON EYE AR HUD for Meta Quest 3 (passthrough)."
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.4", "Mobile")
@@ -24,6 +24,8 @@ textures/vram_compression/import_etc2_astc=true
 
 openxr/environment_blend_mode=2
 openxr/extensions/meta/passthrough=true
+openxr/extensions/meta/scene_api=true
+openxr/extensions/meta/anchor_api=true
 openxr/enabled=true
 openxr/foveation_level=2
 shaders/enabled=true

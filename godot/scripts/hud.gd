@@ -112,6 +112,17 @@ func _minimap(c: Vector2, R: float) -> void:
 	# north marker
 	var n: Vector2 = c + Vector2(0, -R + 14).rotated(rot)
 	txt(n - Vector2(8, -8), "N", 18, RED)
+	if st.get("plan_on", false):
+		var cs: float = maxf(2.0, st.get("plan_cell", 0.25) * scale)
+		for q in st.get("plan_floor", []):
+			var p: Vector2 = to_px.call(q); if (p - c).length() < R - 4: draw_rect(Rect2(p - Vector2(cs, cs) / 2, Vector2(cs, cs)), Color(0.6, 0.8, 0.2, 0.12))
+		for q in st.get("plan_walls", []):
+			var p: Vector2 = to_px.call(q); if (p - c).length() < R - 4: draw_rect(Rect2(p - Vector2(cs, cs) / 2, Vector2(cs, cs)), GREEN)
+		for q in st.get("plan_doors", []):
+			var p: Vector2 = to_px.call(q); if (p - c).length() < R - 4: draw_rect(Rect2(p - Vector2(cs, cs) / 2, Vector2(cs, cs)), AMBER)
+		for r in st.get("plan_rooms", []):
+			var p: Vector2 = to_px.call(r.p); if (p - c).length() < R - 10: txt(p - Vector2(20, -4), r.name, 12, DIM)
+		txt(c + Vector2(-R, -R - 10), st.get("plan_status", ""), 14, DIM)
 	var path: Array = st.get("path", [])
 	for i in range(1, path.size()): draw_line(to_px.call(path[i - 1]), to_px.call(path[i]), DIM, 2)
 	for r in st.get("rooms", []):

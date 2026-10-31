@@ -85,3 +85,9 @@ To run the tests: `godot --headless --xr-mode off --path godot -s tests/run_test
 - Stable tracking IDs: constant-velocity tracker with IoU + centre-distance matching, 1.2 s miss tolerance, head-rotation compensation.
 - Camera plugin: starts automatically after the permission dialog, retries after camera errors, clearer status line.
 - Install: `adb uninstall com.govconnew.pigeoneyequest` (optional) then `adb install -r pigeon-eye-quest-0.1.1.apk`. Needs Horizon OS v74+ for the passthrough camera API.
+
+## v0.1.2
+- **Box alignment:** the Quest 3 RGB camera sits below/ahead of the eyes and is pitched down, so raw boxes drew too high. Boxes are now re-projected from the camera to the centre eye at the estimated distance (pitch correction + camera-offset parallax). Tunable: Settings › *Box align* (0–14° down, default 6°).
+- **Rough floor plan on the minimap:** 0.25 m grid from Meta scene data — wall / door-frame / floor anchors and the global scene mesh sliced at walking height (0.4–1.8 m) — plus the area you have walked. Walls green, doorways amber (door-frame anchors or 0.5–1.25 m wall gaps), rooms = floor regions split by walls+doorways, labelled `R1 12m²`. Status line above the minimap.
+  - **Run a space scan first** (Quest Settings › Physical space › Space setup, or Settings › *SCAN ROOM* in the app) and allow the *spatial data* permission. Without a scan the plan only shows walked area.
+  - Rough sketch for orientation only — not architectural.

@@ -98,7 +98,7 @@ func _init() -> void:
 	main.S.north_offset = 0.0; main.S.north_set = false
 	var st: Dictionary = main.build_hud_state(Time.get_ticks_msec() * 1.0)
 	check("app (demo): contacts confirmed with distance + bearing", st.contacts.size() >= 1 and st.contact_rows.any(func(r): return r.begins_with("PERSON") and "°" in r), st.contact_rows)
-	check("v0.1.1: boxes only — no skeleton, no hands readout", st.skeletons.is_empty() and not ("HANDS" in st.counts) and not st.contacts.any(func(c): return "HANDS" in str(c.lines)), st.counts)
+	check("boxes only — no skeleton, no hands readout", st.skeletons.is_empty() and not ("HANDS" in st.counts) and not st.contacts.any(func(c): return "HANDS" in str(c.lines)), st.counts)
 	check("v0.1.1: pose disabled in settings + plugin flag", main.S.pose == false and main.POSE_FEATURE == false)
 	check("app (demo): no weapon classes anywhere", not ("knife" in str(st) or "gun" in str(st).to_lower() or "weapon" in str(st).to_lower()))
 	main._handle_action("waypoint"); main._handle_action("clear")
@@ -117,6 +117,44 @@ func _init() -> void:
 	await create_timer(0.8).timeout
 	st = main.build_hud_state(Time.get_ticks_msec() * 1.0)
 	check("squad: member position + shared waypoint/room received over UDP", st.squad_members.size() == 1 and st.squad_members[0].cs == "FALCON" and st.waypoints.any(func(w): return w.name == "FALCON:WP1"), st.squad_members)
+	# ---- v0.1.2 box alignment: camera pitched down vs eyes → boxes must move DOWN on the HUD
+	main.last_frame = {"w": 640, "h": 480, "intr": [480.0, 480.0, 320.0, 240.0]}
+	main.S.box_pitch = 0.0; var y0: float = main.cam_to_hud_at(Vector2(320, 200), 3.0).y
+	main.S.box_pitch = 6.0; var y6: float = main.cam_to_hud_at(Vector2(320, 200), 3.0).y
+	check("box align: 6° correction moves boxes down", y6 > y0 + 50.0, [y0, y6])
+	check("box align: camera-below-eye parallax lowers near boxes more", main.cam_to_hud_at(Vector2(320, 200), 1.0).y > y6)
+	# ---- v0.1.2 rough floor plan: two 4×4 m rooms, partition with a 1 m opening
+	var fp := FloorPlan.new()
+	fp.add_floor(PackedVector2Array([Vector2(0, 0), Vector2(8, 0), Vector2(8, 4), Vector2(0, 4)]))
+	for w in [[Vector2(0, 0), Vector2(8, 0)], [Vector2(8, 0), Vector2(8, 4)], [Vector2(8, 4), Vector2(0, 4)], [Vector2(0, 4), Vector2(0, 0)], [Vector2(4, 0), Vector2(4, 1.5)], [Vector2(4, 2.5), Vector2(4, 4)]]:
+		fp.add_wall(w[0], w[1])
+	fp.rebuild()
+	check("floor plan: wall gap at walking height becomes a doorway → 2 rooms", fp.rooms.size() == 2, fp.rooms)
+	check("floor plan: room areas roughly 4×4", fp.rooms.size() == 2 and absf(fp.rooms[0].area - 13.0) < 4.0, fp.rooms.map(func(r): return r.area))
+	var fp2 := FloorPlan.new()
+	fp2.add_floor(PackedVector2Array([Vector2(0, 0), Vector2(8, 0), Vector2(8, 4), Vector2(0, 4)]))
+	var quad := func(a: Vector2, b: Vector2, y0_: float, y1_: float, v: PackedVector3Array, ix: PackedInt32Array):
+		var n := v.size(); v.append_array([Vector3(a.x, y0_, a.y), Vector3(b.x, y0_, b.y), Vector3(b.x, y1_, b.y), Vector3(a.x, y1_, a.y)])
+		ix.append_array([n, n + 1, n + 2, n, n + 2, n + 3])
+	var mv := PackedVector3Array(); var mi := PackedInt32Array()
+	quad.call(Vector2(4, 0), Vector2(4, 1.5), 0.0, 2.4, mv, mi); quad.call(Vector2(4, 2.5), Vector2(4, 4), 0.0, 2.4, mv, mi)
+	quad.call(Vector2(4, 1.5), Vector2(4, 2.5), 2.05, 2.4, mv, mi)  # door header above walking height
+	quad.call(Vector2(0, 0), Vector2(8, 0), 0.0, 2.4, mv, mi); quad.call(Vector2(0, 4), Vector2(8, 4), 0.0, 2.4, mv, mi)
+	fp2.add_mesh(mv, mi); fp2.rebuild()
+	check("floor plan: scene mesh walls sliced at walking height, header ignored → 2 rooms", fp2.rooms.size() == 2 and fp2.walls_n == 0 and fp2.mesh_tris == 10, [fp2.rooms.size(), fp2.mesh_tris])
+	var fp3 := FloorPlan.new()
+	fp3.add_floor(PackedVector2Array([Vector2(0, 0), Vector2(8, 0), Vector2(8, 4), Vector2(0, 4)]))
+	fp3.add_wall(Vector2(4, 0), Vector2(4, 4)); fp3.add_door(Vector2(4, 1.6), Vector2(4, 2.4)); fp3.rebuild()
+	check("floor plan: door-frame anchor punches wall and splits rooms", fp3.rooms.size() == 2 and fp3.cells_near(Vector2(4, 2), 1.0, FloorPlan.DOOR).size() > 0)
+	# scene anchors through main: wall anchor (plane X axis along the wall) + floor boundary
+	main.plan.clear()
+	main.add_scene_entity(PackedStringArray(["FLOOR"]), Transform3D(Basis(Vector3.RIGHT, -PI / 2), Vector3(0, 0, -3)), {"get_boundary_2d": PackedVector2Array([Vector2(-3, -3), Vector2(3, -3), Vector2(3, 3), Vector2(-3, 3)])})
+	main.add_scene_entity(PackedStringArray(["WALL_FACE"]), Transform3D(Basis.IDENTITY, Vector3(0, 1.2, -6)), {"get_bounding_box_2d": Rect2(-3, -1.2, 6, 2.4)})
+	main.add_scene_entity(PackedStringArray(["WALL_FACE"]), Transform3D(Basis.IDENTITY, Vector3(0, 1.2, -3)), {"get_bounding_box_2d": Rect2(-3, -1.2, 6, 2.4)})
+	check("scene anchors: wall splits floor into 2 rooms", main.plan.rooms.size() == 2, main.plan.rooms)
+	var stp: Dictionary = main.build_hud_state(Time.get_ticks_msec() * 1.0)
+	check("HUD state carries floor plan walls + rooms", stp.plan_walls.size() > 10 and stp.plan_rooms.size() == 2 and "rooms" in stp.plan_status, stp.plan_status)
+	main.S.box_pitch = 6.0
 	# screenshot of the desktop HUD (only when a display/renderer is available)
 	if DisplayServer.get_name() != "headless":
 		main._handle_action("menu"); main._handle_action("menu")

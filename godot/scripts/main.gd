@@ -3,7 +3,7 @@
 ## No network access except LAN UDP for the squad link. Nothing is uploaded.
 extends Node3D
 
-const VERSION := "0.1.1"
+const VERSION := "0.1.2"
 ## v0.1.1: boxes only — skeleton / hands features are compiled out of this build (user request).
 const POSE_FEATURE := false
 const HUD_W := 1280; const HUD_H := 960
@@ -16,7 +16,14 @@ var demo := false
 var origin: XROrigin3D; var cam: Node3D; var right: XRController3D; var left: XRController3D
 var hud_vp: SubViewport; var hud: Control
 var cfg := ConfigFile.new()
-var S := {"detect": true, "pose": false, "low_power": false, "minimap": true, "squad": true, "big": false, "callsign": "PIGEON", "north_offset": 0.0, "north_set": false, "demo": false}
+var S := {"detect": true, "pose": false, "low_power": false, "minimap": true, "squad": true, "big": false, "callsign": "PIGEON", "north_offset": 0.0, "north_set": false, "demo": false, "box_pitch": 6.0, "plan": true}
+## Quest 3 RGB passthrough camera vs centre eye (head-local metres): slightly below and ahead of the eyes.
+const CAM_OFFSET := Vector3(0.0, -0.03, -0.07)
+const BOX_PITCHES := [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0]
+var plan := FloorPlan.new()
+var scene_mgr = null
+var scene_status := "PLAN: walk to sketch"
+var _plan_t := 0.0
 var det_tracker := PELogic.DetTracker.new()
 var pose_tracker := PELogic.PoseTracker.new()
 var last_frame := {}       # last vision frame: w, h, intr, t
@@ -56,6 +63,7 @@ func _build_rig() -> void:
 		_enable_passthrough(xr)
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 		cam = XRCamera3D.new()
+		call_deferred("_start_scene")
 	else:
 		cam = Camera3D.new(); (cam as Camera3D).fov = 70
 	cam.position = Vector3(0, 1.6, 0)
@@ -68,6 +76,71 @@ func _build_rig() -> void:
 		c.button_pressed.connect(_on_button.bind(side))
 		if side == "right": right = c
 		else: left = c
+
+# ---------------------------------------------------------------- floor plan from Meta scene data
+func _start_scene() -> void:
+	if not ClassDB.class_exists("OpenXRFbSceneManager"): scene_status = "PLAN: scene API missing (path only)"; return
+	get_tree().on_request_permissions_result.connect(_on_perm)
+	if "com.oculus.permission.USE_SCENE" not in OS.get_granted_permissions():
+		OS.request_permission("com.oculus.permission.USE_SCENE")
+		scene_status = "PLAN: waiting for spatial-data permission"
+	scene_mgr = ClassDB.instantiate("OpenXRFbSceneManager")
+	var ps := PackedScene.new(); var n := Node3D.new(); ps.pack(n); n.free()
+	scene_mgr.default_scene = ps
+	scene_mgr.auto_create = true
+	scene_mgr.openxr_fb_scene_anchor_created.connect(_on_scene_anchor)
+	scene_mgr.openxr_fb_scene_data_missing.connect(func(): scene_status = "PLAN: no space scan — Settings › SCAN ROOM")
+	scene_mgr.openxr_fb_scene_capture_completed.connect(func(ok): _reload_scene())
+	origin.add_child(scene_mgr)
+
+func _on_perm(perm: String, granted: bool) -> void:
+	if perm == "com.oculus.permission.USE_SCENE":
+		if granted: _reload_scene()
+		else: scene_status = "PLAN: spatial data denied (path only)"
+
+func _reload_scene() -> void:
+	if scene_mgr == null: return
+	if scene_mgr.are_scene_anchors_created(): scene_mgr.remove_scene_anchors()
+	plan.clear(); for p in path: plan.mark_walked(p)
+	scene_mgr.create_scene_anchors()
+	scene_status = "PLAN: loading scene…"
+
+func _scan_room() -> void:
+	if scene_mgr == null: _toast("SCENE API NOT AVAILABLE"); return
+	scene_mgr.request_scene_capture("")
+	_toast("OPENING SPACE SETUP")
+
+func _on_scene_anchor(node: Node, entity) -> void:
+	await get_tree().process_frame  # anchor node transform is set after the signal
+	if not is_instance_valid(node): return
+	add_scene_entity(PackedStringArray(entity.get_semantic_labels()), (node as Node3D).global_transform, entity)
+
+## Feeds one scene anchor into the floor plan. Public for tests (entity may be a Dictionary stub).
+func add_scene_entity(labels: PackedStringArray, xf: Transform3D, entity) -> void:
+	var lab := ",".join(labels).to_lower()
+	plan.anchors_n += 1
+	var getf := func(m: String): return entity.get(m) if entity is Dictionary else entity.call(m)
+	if "floor" in lab:
+		var b = getf.call("get_boundary_2d")
+		if b is PackedVector2Array and b.size() >= 3:
+			plan.floor_y = xf.origin.y
+			var poly := PackedVector2Array()
+			for q in b: var w: Vector3 = xf * Vector3(q.x, q.y, 0); poly.append(Vector2(w.x, w.z))
+			plan.add_floor(poly)
+	elif "wall" in lab or "door" in lab or "invisible_wall" in lab:
+		var r = getf.call("get_bounding_box_2d")
+		if r is Rect2 and r.size.x > 0.05:
+			var a: Vector3 = xf * Vector3(r.position.x, 0, 0); var c: Vector3 = xf * Vector3(r.end.x, 0, 0)
+			if "door" in lab: plan.add_door(Vector2(a.x, a.z), Vector2(c.x, c.z))
+			else: plan.add_wall(Vector2(a.x, a.z), Vector2(c.x, c.z))
+	elif "global_mesh" in lab or "mesh" in lab:
+		var m = getf.call("get_triangle_mesh")
+		if m is Array and m.size() >= 2:
+			var v := PackedVector3Array()
+			for q in m[0]: v.append(xf * q)
+			plan.add_mesh(v, PackedInt32Array(m[1]))
+	plan.rebuild()
+	scene_status = "PLAN: %d rooms · %d walls · %d doors (scene)" % [plan.rooms.size(), plan.walls_n, plan.doors_n]
 
 ## Meta colour passthrough. Requires project setting xr/openxr/extensions/meta/passthrough=true (Godot OpenXR
 ## Vendors exposes ALPHA_BLEND only then) + export option meta_xr_features/passthrough + transparent viewport.
@@ -149,6 +222,9 @@ func _menu_items() -> Array:
 		"SQUAD SYNC (stand on shared spot, face same way)",
 		"Clear waypoints + rooms + path",
 		"Demo feed: " + on.call(demo),
+		"Box align: %d° down (raise/lower boxes)" % int(S.box_pitch),
+		"Floor plan on minimap: " + on.call(S.plan),
+		"SCAN ROOM (Meta Space Setup) / reload plan",
 		"Close",
 	]
 
@@ -164,11 +240,17 @@ func _menu_activate(i: int) -> void:
 		5: S.callsign = CALLSIGNS[(CALLSIGNS.find(S.callsign) + 1) % CALLSIGNS.size()]
 		6: S.north_offset = -_yaw_cw(); S.north_set = true; _toast("NORTH SET")
 		7: squad_origin = Transform3D(Basis(Vector3.UP, -deg_to_rad(_yaw_cw())), _head().origin); _toast("SQUAD ORIGIN SET HERE"); _log("sync", "squad origin set")
-		8: waypoints.clear(); rooms.clear(); path.clear(); _toast("CLEARED")
+		8: waypoints.clear(); rooms.clear(); path.clear(); plan.clear(); _toast("CLEARED")
 		9:
 			demo = not demo; S.demo = demo
 			vision_status = "vision: DEMO FEED (synthetic)" if demo else ("vision: " + vision.getStatus() if vision else "vision: off")
-		10: menu_open = false
+		10: S.box_pitch = BOX_PITCHES[(BOX_PITCHES.find(S.box_pitch) + 1) % BOX_PITCHES.size()]
+		11: S.plan = not S.plan
+		12:
+			if scene_mgr != null and not scene_mgr.are_scene_anchors_created(): _scan_room()
+			elif scene_mgr != null: _reload_scene(); _toast("FLOOR PLAN RELOADED")
+			else: _toast("NO SCENE API · PLAN FROM PATH")
+		13: menu_open = false
 	_save_settings()
 
 # ---------------------------------------------------------------- input
@@ -240,10 +322,21 @@ func _cam_px_rotated(px: Vector2, rel: Basis) -> Vector2:
 	if v.z > -0.05: return px
 	return Vector2(intr[2] + intr[0] * (v.x / -v.z), intr[3] - intr[1] * (v.y / -v.z))
 
-func cam_dir_world(px: Vector2, head: Transform3D) -> Vector3:
+## Ray of a camera pixel in head space, corrected for the Quest 3 camera pitching down relative to the eyes
+## (S.box_pitch degrees, tunable in the menu). The raw camera image sees people higher than the eye does.
+func cam_ray_local(px: Vector2) -> Vector3:
 	var intr: Array = last_frame.get("intr", [480.0, 480.0, 320.0, 240.0])
 	var local := Vector3((px.x - intr[2]) / intr[0], -(px.y - intr[3]) / intr[1], -1.0).normalized()
-	return head.basis * local
+	return Basis(Vector3.RIGHT, -deg_to_rad(float(S.box_pitch))) * local
+
+func cam_dir_world(px: Vector2, head: Transform3D) -> Vector3:
+	return head.basis * cam_ray_local(px)
+
+## Camera pixel at distance d → HUD pixel as seen from the centre eye (pitch + camera-position parallax).
+func cam_to_hud_at(px: Vector2, d: float) -> Vector2:
+	var p: Vector3 = CAM_OFFSET + cam_ray_local(px) * maxf(d, 0.6)
+	if p.z > -0.05: return cam_to_hud(px)
+	return Vector2(HUD_W / 2.0 + (p.x / -p.z) / (HUD_QW / HUD_DIST) * HUD_W, HUD_H / 2.0 + (-p.y / -p.z) / (HUD_QH / HUD_DIST) * HUD_H)
 
 # ---------------------------------------------------------------- vision
 func _on_vision_json(js: String) -> void:
@@ -378,6 +471,11 @@ func _process(dt: float) -> void:
 	if path.is_empty() or Vector2(hp.x - path[-1].x, hp.z - path[-1].z).length() > 0.5:
 		path.append(hp)
 		if path.size() > 4000: path.pop_front()
+		plan.mark_walked(hp)
+	if now_s - _plan_t > 1.0 and plan.dirty:
+		_plan_t = now_s; plan.rebuild()
+		if scene_mgr == null or plan.anchors_n == 0:
+			scene_status = scene_status if scene_status.begins_with("PLAN: no") or scene_status.begins_with("PLAN: wait") or scene_status.begins_with("PLAN: spatial") else "PLAN: %d rooms (walked area only)" % plan.rooms.size()
 	if S.squad: _squad_poll(now_s)
 	hud.st = build_hud_state(now)
 	hud.queue_redraw()
@@ -411,7 +509,7 @@ func build_hud_state(now: float) -> Dictionary:
 			var dir: Vector3 = cam_dir_world(centre, frame_head)
 			var wpos: Vector3 = frame_head.origin + dir * dist.d
 			var brg: float = bearing_to(wpos)
-			var a: Vector2 = cam_to_hud(tr.box.position); var b: Vector2 = cam_to_hud(tr.box.end)
+			var a: Vector2 = cam_to_hud_at(tr.box.position, dist.d); var b: Vector2 = cam_to_hud_at(tr.box.end, dist.d)
 			var lines := ["%s %d · %d%%" % [tr.c.to_upper(), tr.id, int(tr.s * 100)], "%s · %03d°" % [dtxt, int(brg)]]
 			var up := false
 			if ps != null:
@@ -444,7 +542,16 @@ func build_hud_state(now: float) -> Dictionary:
 		for w in m.get("wps", []): st.waypoints.append({"name": "%s:%s" % [m.cs, w[0]], "p": to_map(_from_squad(Vector3(w[1], 0, w[2])))})
 		for r in m.get("rooms", []): st.rooms.append({"name": "%s:%s" % [m.cs, r[0]], "p": to_map(_from_squad(Vector3(r[1], 0, r[2])))})
 	for w in waypoints: marks.append({"brg": bearing_to(w.pos), "col": Color("#FFB000")})
-	st.squad_members = sm; st.tape_marks = marks; st.map_range = 20.0
+	st.plan_on = S.plan; st.plan_status = scene_status
+	if S.plan:
+		var me2 := Vector2(_head().origin.x, _head().origin.z)
+		var mp := func(q: Vector2) -> Vector2: return to_map(Vector3(q.x, 0, q.y))
+		st.plan_walls = plan.cells_near(me2, 20.0, FloorPlan.WALL).map(mp)
+		st.plan_doors = plan.cells_near(me2, 20.0, FloorPlan.DOOR).map(mp)
+		st.plan_floor = plan.cells_near(me2, 20.0, FloorPlan.FLOOR).map(mp) if plan.cells.size() < 20000 else []
+		st.plan_rooms = plan.rooms.map(func(r): return {"name": "%s %.0fm²" % [r.name, r.area], "p": mp.call(r.p)})
+		st.plan_cell = FloorPlan.CELL
+	st.squad_members = sm; st.tape_marks = marks; st.map_range = 12.0 if S.plan and plan.cells.size() > 0 else 20.0
 	st.menu_open = menu_open; st.menu_items = _menu_items(); st.menu_sel = menu_sel
 	st.toast = toast_text if Time.get_ticks_msec() / 1000.0 < toast_until else ""
 	st.hint = "R-TRIG waypoint · A mark clear · B/≡ settings · X big text" if xr_on else "W waypoint · C clear · M settings · ←/→ turn · B big"
