@@ -55,6 +55,7 @@ class PigeonVision(godot: Godot) : GodotPlugin(godot) {
     private var camW = 640; private var camH = 480
     private var bmp: Bitmap? = null
     private var px: IntArray? = null
+    private var frames = 0L
 
     override fun getPluginName() = "PigeonVision"
     override fun getPluginSignals(): Set<SignalInfo> = setOf(
@@ -87,14 +88,24 @@ class PigeonVision(godot: Godot) : GodotPlugin(godot) {
         return arr.toString()
     }
 
+    private var asked = false
     @UsedByGodot fun start(): Boolean {
         val a = activity ?: return false
-        if (!hasPermission()) { setStatus("NO CAMERA PERMISSION"); requestPermission(); return false }
-        if (thread != null) return true
+        if (!hasPermission()) {
+            setStatus("waiting for camera permission")
+            if (!asked) { asked = true; a.runOnUiThread { requestPermission() } }
+            return false
+        }
+        if (thread != null) { if (status.startsWith("RUNNING") || status.startsWith("opening") || status == "loading models") return true; stop() }
         thread = HandlerThread("pigeonvision").also { it.start() }
         handler = Handler(thread!!.looper)
         handler!!.post { try { open(a) } catch (e: Throwable) { setStatus("CAMERA ERROR: ${e.message}") } }
         return true
+    }
+
+    override fun onMainRequestPermissionsResult(requestCode: Int, permissions: Array<String>?, grantResults: IntArray?) {
+        super.onMainRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (hasPermission()) start() else setStatus("CAMERA PERMISSION DENIED — Settings › Privacy › App permissions")
     }
 
     @UsedByGodot fun stop() {
@@ -141,6 +152,7 @@ class PigeonVision(godot: Godot) : GodotPlugin(godot) {
         reader = ImageReader.newInstance(camW, camH, ImageFormat.YUV_420_888, 2).also { r ->
             r.setOnImageAvailableListener({ onImage(it) }, handler)
         }
+        setStatus("opening camera $pick")
         cm.openCamera(pick, object : CameraDevice.StateCallback() {
             override fun onOpened(d: CameraDevice) {
                 device = d
@@ -154,8 +166,8 @@ class PigeonVision(godot: Godot) : GodotPlugin(godot) {
                     override fun onConfigureFailed(s: CameraCaptureSession) { setStatus("CAMERA SESSION FAILED") }
                 }, handler)
             }
-            override fun onDisconnected(d: CameraDevice) { d.close(); setStatus("camera disconnected") }
-            override fun onError(d: CameraDevice, e: Int) { d.close(); setStatus("CAMERA ERROR $e") }
+            override fun onDisconnected(d: CameraDevice) { d.close(); device = null; setStatus("camera disconnected (retrying)") }
+            override fun onError(d: CameraDevice, e: Int) { d.close(); device = null; setStatus("CAMERA ERROR $e (retrying)") }
         }, handler)
     }
 
@@ -191,6 +203,7 @@ class PigeonVision(godot: Godot) : GodotPlugin(godot) {
                 }
             }
             out.put("poses", poses).put("ms", SystemClock.uptimeMillis() - t0)
+            frames++
             emitSignal("vision_result", out.toString())
         } catch (e: Throwable) {
             Log.e(TAG, "frame", e); runCatching { img.close() }

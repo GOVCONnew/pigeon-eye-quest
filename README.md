@@ -78,3 +78,10 @@ To run the tests: `godot --headless --xr-mode off --path godot -s tests/run_test
 - Godot OpenXR Vendors plugin (MIT)
 - MediaPipe Tasks and models EfficientDet-Lite0 / Pose Landmarker lite (Apache-2.0)
 - three.js (MIT)
+
+## v0.1.1 (headset fix)
+- Fixed black view: enabled `xr/openxr/extensions/meta/passthrough` + alpha-blend environment mode; runtime falls back to the FB passthrough extension. HUD shows a `PASSTHROUGH ON/…` status line.
+- Boxes only (people + pets: dog, cat, horse, sheep, cow, bird, bear). Skeleton / hands readouts removed for this build.
+- Stable tracking IDs: constant-velocity tracker with IoU + centre-distance matching, 1.2 s miss tolerance, head-rotation compensation.
+- Camera plugin: starts automatically after the permission dialog, retries after camera errors, clearer status line.
+- Install: `adb uninstall com.govconnew.pigeoneyequest` (optional) then `adb install -r pigeon-eye-quest-0.1.1.apk`. Needs Horizon OS v74+ for the passthrough camera API.

@@ -3,7 +3,9 @@
 ## No network access except LAN UDP for the squad link. Nothing is uploaded.
 extends Node3D
 
-const VERSION := "0.1.0"
+const VERSION := "0.1.1"
+## v0.1.1: boxes only — skeleton / hands features are compiled out of this build (user request).
+const POSE_FEATURE := false
 const HUD_W := 1280; const HUD_H := 960
 const HUD_DIST := 1.0; const HUD_QW := 1.4; const HUD_QH := 1.05   # metres → ±35° × ±27.7°
 const CALLSIGNS := ["PIGEON", "FALCON", "HAWK", "RAVEN", "OWL", "KITE"]
@@ -14,12 +16,14 @@ var demo := false
 var origin: XROrigin3D; var cam: Node3D; var right: XRController3D; var left: XRController3D
 var hud_vp: SubViewport; var hud: Control
 var cfg := ConfigFile.new()
-var S := {"detect": true, "pose": true, "low_power": false, "minimap": true, "squad": true, "big": false, "callsign": "PIGEON", "north_offset": 0.0, "north_set": false, "demo": false}
+var S := {"detect": true, "pose": false, "low_power": false, "minimap": true, "squad": true, "big": false, "callsign": "PIGEON", "north_offset": 0.0, "north_set": false, "demo": false}
 var det_tracker := PELogic.DetTracker.new()
 var pose_tracker := PELogic.PoseTracker.new()
 var last_frame := {}       # last vision frame: w, h, intr, t
 var frame_head: Transform3D  # head pose when the last frame arrived
 var vision_status := "vision: off"
+var passthrough_status := "PASSTHROUGH: desktop"
+var _vision_retry_t := 0.0
 var vision_ms := 0.0; var vision_fps := 0.0; var _vf_count := 0; var _vf_t := 0.0
 var path: Array = []; var waypoints: Array = []; var rooms: Array = []; var contacts_world: Array = []
 var events: Array = []
@@ -49,9 +53,7 @@ func _build_rig() -> void:
 		xr_on = true
 		get_viewport().use_xr = true
 		get_viewport().transparent_bg = true
-		var modes: Array = xr.get_supported_environment_blend_modes()
-		if XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in modes:
-			xr.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND
+		_enable_passthrough(xr)
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 		cam = XRCamera3D.new()
 	else:
@@ -66,6 +68,19 @@ func _build_rig() -> void:
 		c.button_pressed.connect(_on_button.bind(side))
 		if side == "right": right = c
 		else: left = c
+
+## Meta colour passthrough. Requires project setting xr/openxr/extensions/meta/passthrough=true (Godot OpenXR
+## Vendors exposes ALPHA_BLEND only then) + export option meta_xr_features/passthrough + transparent viewport.
+func _enable_passthrough(xr: XRInterface) -> void:
+	var modes: Array = xr.get_supported_environment_blend_modes()
+	var ok := false
+	if XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND in modes:
+		ok = xr.set_environment_blend_mode(XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND)
+	if not ok and Engine.has_singleton("OpenXRFbPassthroughExtensionWrapper"):
+		var fb = Engine.get_singleton("OpenXRFbPassthroughExtensionWrapper")
+		if fb.has_method("start_passthrough"): ok = fb.start_passthrough()
+	passthrough_status = "PASSTHROUGH: ON" if ok else "PASSTHROUGH: UNAVAILABLE modes=%s" % str(modes)
+	print("PigeonEye ", passthrough_status, " blend modes ", modes)
 
 func _build_hud() -> void:
 	hud_vp = SubViewport.new(); hud_vp.size = Vector2i(HUD_W, HUD_H); hud_vp.transparent_bg = true
@@ -92,10 +107,12 @@ func _build_hud() -> void:
 func _start_vision() -> void:
 	if Engine.has_singleton("PigeonVision"):
 		vision = Engine.get_singleton("PigeonVision")
-		vision.connect("vision_result", _on_vision_json)
-		vision.connect("vision_status", func(s): vision_status = "vision: " + s)
+		vision.connect("vision_result", _on_vision_json, CONNECT_DEFERRED)  # plugin emits from its camera thread
+		vision.connect("vision_status", func(s): vision_status = "vision: " + s, CONNECT_DEFERRED)
 		_apply_vision_settings()
-		if S.detect: vision.start()
+		if S.detect:
+			if not vision.hasPermission(): vision_status = "vision: waiting for camera permission"
+			vision.start()
 	elif demo:
 		vision_status = "vision: DEMO FEED (synthetic)"
 	else:
@@ -103,7 +120,7 @@ func _start_vision() -> void:
 
 func _apply_vision_settings() -> void:
 	if vision == null: return
-	vision.setPoseEnabled(S.pose)
+	vision.setPoseEnabled(POSE_FEATURE and S.pose)
 	vision.setMinIntervalMs(150 if S.low_power else 0)
 
 func _notification(what: int) -> void:
@@ -113,6 +130,7 @@ func _notification(what: int) -> void:
 func _load_settings() -> void:
 	if cfg.load("user://settings.cfg") == OK:
 		for k in S.keys(): S[k] = cfg.get_value("s", k, S[k])
+	if not POSE_FEATURE: S.pose = false
 
 func _save_settings() -> void:
 	for k in S.keys(): cfg.set_value("s", k, S[k])
@@ -121,8 +139,7 @@ func _save_settings() -> void:
 func _menu_items() -> Array:
 	var on := func(b): return "ON" if b else "OFF"
 	return [
-		"Person/animal detection: " + on.call(S.detect),
-		"Pose skeleton + hands: " + on.call(S.pose),
+		"Person/pet detection boxes: " + on.call(S.detect),
 		"Low power (≤7 Hz vision): " + on.call(S.low_power),
 		"Minimap: " + on.call(S.minimap),
 		"Big text: " + on.call(S.big),
@@ -140,19 +157,18 @@ func _menu_activate(i: int) -> void:
 		0:
 			S.detect = not S.detect
 			if vision: (vision.start() if S.detect else vision.stop())
-		1: S.pose = not S.pose; _apply_vision_settings()
-		2: S.low_power = not S.low_power; _apply_vision_settings()
-		3: S.minimap = not S.minimap
-		4: S.big = not S.big
-		5: S.squad = not S.squad
-		6: S.callsign = CALLSIGNS[(CALLSIGNS.find(S.callsign) + 1) % CALLSIGNS.size()]
-		7: S.north_offset = -_yaw_cw(); S.north_set = true; _toast("NORTH SET")
-		8: squad_origin = Transform3D(Basis(Vector3.UP, -deg_to_rad(_yaw_cw())), _head().origin); _toast("SQUAD ORIGIN SET HERE"); _log("sync", "squad origin set")
-		9: waypoints.clear(); rooms.clear(); path.clear(); _toast("CLEARED")
-		10:
+		1: S.low_power = not S.low_power; _apply_vision_settings()
+		2: S.minimap = not S.minimap
+		3: S.big = not S.big
+		4: S.squad = not S.squad
+		5: S.callsign = CALLSIGNS[(CALLSIGNS.find(S.callsign) + 1) % CALLSIGNS.size()]
+		6: S.north_offset = -_yaw_cw(); S.north_set = true; _toast("NORTH SET")
+		7: squad_origin = Transform3D(Basis(Vector3.UP, -deg_to_rad(_yaw_cw())), _head().origin); _toast("SQUAD ORIGIN SET HERE"); _log("sync", "squad origin set")
+		8: waypoints.clear(); rooms.clear(); path.clear(); _toast("CLEARED")
+		9:
 			demo = not demo; S.demo = demo
 			vision_status = "vision: DEMO FEED (synthetic)" if demo else ("vision: " + vision.getStatus() if vision else "vision: off")
-		11: menu_open = false
+		10: menu_open = false
 	_save_settings()
 
 # ---------------------------------------------------------------- input
@@ -218,6 +234,12 @@ func cam_to_hud(px: Vector2) -> Vector2:
 	var tx: float = (px.x - intr[2]) / intr[0]; var ty: float = (px.y - intr[3]) / intr[1]
 	return Vector2(HUD_W / 2.0 + tx / (HUD_QW / HUD_DIST) * HUD_W, HUD_H / 2.0 + ty / (HUD_QH / HUD_DIST) * HUD_H)
 
+func _cam_px_rotated(px: Vector2, rel: Basis) -> Vector2:
+	var intr: Array = last_frame.get("intr", [480.0, 480.0, 320.0, 240.0])
+	var v := rel * Vector3((px.x - intr[2]) / intr[0], -(px.y - intr[3]) / intr[1], -1.0)
+	if v.z > -0.05: return px
+	return Vector2(intr[2] + intr[0] * (v.x / -v.z), intr[3] - intr[1] * (v.y / -v.z))
+
 func cam_dir_world(px: Vector2, head: Transform3D) -> Vector3:
 	var intr: Array = last_frame.get("intr", [480.0, 480.0, 320.0, 240.0])
 	var local := Vector3((px.x - intr[2]) / intr[0], -(px.y - intr[3]) / intr[1], -1.0).normalized()
@@ -231,7 +253,11 @@ func _on_vision_json(js: String) -> void:
 ## One vision frame: {w, h, intr:[fx,fy,cx,cy], ms, dets:[{c,s,x,y,w,h}], poses:[[[x,y,vis]×33], …]}
 func on_vision(d: Dictionary) -> void:
 	var now := Time.get_ticks_msec() * 1.0
+	var prev_head := frame_head; var had_prev := not last_frame.is_empty()
 	last_frame = d; frame_head = _head()
+	if had_prev:  # remove head rotation since the previous camera frame so boxes stay matched while you look around
+		var rel: Basis = frame_head.basis.inverse() * prev_head.basis
+		det_tracker.compensate(func(px: Vector2) -> Vector2: return _cam_px_rotated(px, rel))
 	vision_ms = lerp(vision_ms, float(d.get("ms", 0)), 0.2)
 	_vf_count += 1
 	if now - _vf_t > 1000.0: vision_fps = _vf_count * 1000.0 / (now - _vf_t); _vf_count = 0; _vf_t = now
@@ -245,7 +271,7 @@ func on_vision(d: Dictionary) -> void:
 		var lm := []
 		for q in p: lm.append(Vector3(q[0], q[1], q[2]))
 		if lm.size() == 33: poses.append(lm)
-	if S.pose: pose_tracker.update(poses, d.w, d.h, now)
+	if POSE_FEATURE and S.pose: pose_tracker.update(poses, d.w, d.h, now)
 	for tr in pose_tracker.tracks:
 		var tag: String = tr.state.tag
 		if tag != "" and hands_logged.get(tr.id, "") != tag: _log("pose", "person %s" % tag)
@@ -340,6 +366,13 @@ func _process(dt: float) -> void:
 		demo_t += dt
 		if fmod(demo_t, 1.0 / 15.0) < dt: on_vision(_demo_frame(demo_t))
 	_poll_stick()
+	# camera permission is granted asynchronously (system dialog); keep retrying until the camera runs
+	if vision != null and S.detect and now_s - _vision_retry_t > 2.0:
+		_vision_retry_t = now_s
+		var vs: String = vision.getStatus()
+		if not vs.begins_with("RUNNING") and vs != "loading models" and not vs.begins_with("opening"):
+			if vision.hasPermission(): vision.start()
+			else: vision_status = "vision: waiting for camera permission (Settings › Privacy › App permissions)"
 	# path breadcrumb every 0.5 m
 	var hp := _head().origin
 	if path.is_empty() or Vector2(hp.x - path[-1].x, hp.z - path[-1].z).length() > 0.5:
@@ -359,6 +392,7 @@ func build_hud_state(now: float) -> Dictionary:
 	var vs := vision_status
 	if vision_fps > 0.0 and S.detect: vs += " · %.0f Hz · %d ms" % [vision_fps, int(vision_ms)]
 	st.vision = vs if S.detect else "vision: OFF"
+	st.passthrough = passthrough_status
 	st.squad = ("SQUAD %d · %s" % [squad_members.size(), S.callsign]) if S.squad and squad_ok else ("SQUAD OFF" if not S.squad else "SQUAD: port busy")
 	var contacts := []; var rows := []; var skels := []; var mapk := []
 	var counts := {}; var hands_up := 0; var hands_vis := -1
@@ -368,7 +402,7 @@ func build_hud_state(now: float) -> Dictionary:
 		for tr in det_tracker.confirmed(now):
 			counts[tr.c] = counts.get(tr.c, 0) + 1
 			var dist: Dictionary = PELogic.box_distance(tr.c, tr.box, fy, fh)
-			var ps = _pose_for(tr.box, now) if tr.c == "person" and S.pose else null
+			var ps = _pose_for(tr.box, now) if POSE_FEATURE and tr.c == "person" and S.pose else null
 			var dtxt := ("≤" if dist.min else "~") + "%.0fm" % dist.d
 			if ps != null:
 				var sd := PELogic.shoulder_distance(ps.lm, fw, fh, fy)
@@ -378,7 +412,7 @@ func build_hud_state(now: float) -> Dictionary:
 			var wpos: Vector3 = frame_head.origin + dir * dist.d
 			var brg: float = bearing_to(wpos)
 			var a: Vector2 = cam_to_hud(tr.box.position); var b: Vector2 = cam_to_hud(tr.box.end)
-			var lines := ["%s %d%%" % [tr.c.to_upper(), int(tr.s * 100)], "%s · %03d°" % [dtxt, int(brg)]]
+			var lines := ["%s %d · %d%%" % [tr.c.to_upper(), tr.id, int(tr.s * 100)], "%s · %03d°" % [dtxt, int(brg)]]
 			var up := false
 			if ps != null:
 				if ps.state.tag != "": lines.append(ps.state.tag); up = ps.state.hands_up == 2

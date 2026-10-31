@@ -72,7 +72,24 @@ func _init() -> void:
 	for i in 5: D.update([{"c": "person", "s": 0.9, "box": Rect2(100 + i * 4, 100, 50, 150)}], i * 66.0)
 	check("det tracker: one confirmed track after 3+ hits", D.confirmed(5 * 66.0).size() == 1 and D.tracks[0].id == 1)
 	D.update([], 2000.0)
-	check("det tracker: dropped after 700 ms", D.tracks.is_empty())
+	check("det tracker: dropped after 1.2 s unseen", D.tracks.is_empty())
+	# person walking fast across the frame at 8 Hz with dropped frames keeps one id; a second person gets another id
+	var D2 := PELogic.DetTracker.new(); var seen := {}
+	for i in 40:
+		if i % 5 == 3: continue  # missed detections
+		var x := 40.0 + i * 13.0  # ~105 px/s at 8 Hz
+		var ds := [{"c": "person", "s": 0.8, "box": Rect2(x, 120, 80, 220)}]
+		if i > 10: ds.append({"c": "dog", "s": 0.7, "box": Rect2(600 - i * 5.0, 380, 90, 70)})
+		D2.update(ds, i * 125.0)
+		for t in D2.confirmed(i * 125.0): if t.c == "person": seen[t.id] = true
+	check("det tracker: walking person keeps one id through missed frames", seen.size() == 1, seen)
+	check("det tracker: pet tracked with its own id", D2.tracks.any(func(t): return t.c == "dog" and t.id != 1))
+	# head turn: boxes jump 120 px between frames; compensation keeps the id
+	var D3 := PELogic.DetTracker.new()
+	for i in 3: D3.update([{"c": "person", "s": 0.9, "box": Rect2(300, 100, 60, 200)}], i * 100.0)
+	D3.compensate(func(p: Vector2) -> Vector2: return p - Vector2(200, 0))
+	D3.update([{"c": "person", "s": 0.9, "box": Rect2(100, 100, 60, 200)}], 300.0)
+	check("det tracker: head-turn compensation keeps id", D3.tracks.size() == 1 and D3.tracks[0].id == 1, D3.tracks.size())
 	# --- full app in demo mode (no XR): HUD state
 	var main: Node3D = load("res://main.tscn").instantiate()
 	main.S.demo = true
@@ -81,7 +98,8 @@ func _init() -> void:
 	main.S.north_offset = 0.0; main.S.north_set = false
 	var st: Dictionary = main.build_hud_state(Time.get_ticks_msec() * 1.0)
 	check("app (demo): contacts confirmed with distance + bearing", st.contacts.size() >= 1 and st.contact_rows.any(func(r): return r.begins_with("PERSON") and "°" in r), st.contact_rows)
-	check("app (demo): skeleton drawn for person with hands readout", st.skeletons.size() == 1 and "HANDS:" in st.counts, st.counts)
+	check("v0.1.1: boxes only — no skeleton, no hands readout", st.skeletons.is_empty() and not ("HANDS" in st.counts) and not st.contacts.any(func(c): return "HANDS" in str(c.lines)), st.counts)
+	check("v0.1.1: pose disabled in settings + plugin flag", main.S.pose == false and main.POSE_FEATURE == false)
 	check("app (demo): no weapon classes anywhere", not ("knife" in str(st) or "gun" in str(st).to_lower() or "weapon" in str(st).to_lower()))
 	main._handle_action("waypoint"); main._handle_action("clear")
 	st = main.build_hud_state(Time.get_ticks_msec() * 1.0)
@@ -89,7 +107,7 @@ func _init() -> void:
 	main.cam.rotate_y(deg_to_rad(-90))
 	check("heading follows head yaw (turn right 90° → 090°)", absf(main.heading() - 90.0) < 0.5, main.heading())
 	main.S.north_offset = -main._yaw_cw() + 0.0; main.S.north_offset = 0.0
-	main._handle_action("menu"); for i in 7: main._handle_action("down")
+	main._handle_action("menu"); for i in 6: main._handle_action("down")
 	main._handle_action("select")
 	check("settings: SET NORTH makes current heading 000°", absf(PELogic.ang_diff(0, main.heading())) < 0.5 and main.S.north_set, main.heading())
 	main._handle_action("menu")

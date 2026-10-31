@@ -182,29 +182,49 @@ class PoseTracker:
 		return out
 
 
-## Detection tracker: IoU association, EMA box smoothing, confirmed after 3 hits, dropped after 700 ms unseen.
+## Detection tracker (v0.1.1): IDs persist while people/pets move. Each track keeps a constant-velocity box model;
+## association is greedy on (1 - IoU) + centre distance / box size against the *predicted* box, same class only.
+## Head rotation between frames is removed by the caller via compensate(). Confirmed after 2 hits; a track survives
+## 1.2 s without detections (brief occlusion / missed frames) and is shown for 0.5 s after its last hit.
 class DetTracker:
-	var tracks: Array = []; var next_id := 1; var confirm_hits := 3; var max_miss_ms := 700.0
+	var tracks: Array = []; var next_id := 1; var confirm_hits := 2; var max_miss_ms := 1200.0; var show_ms := 500.0; var gate := 1.4
+
+	func _pred(tr: Dictionary, t_ms: float) -> Rect2:
+		var dt := clampf((t_ms - tr.t) / 1000.0, 0.0, 0.5)
+		return Rect2(tr.box.position + tr.v * dt, tr.box.size)
+
+	## Shift every track by a function px -> px (e.g. head-rotation compensation between camera frames).
+	func compensate(f: Callable) -> void:
+		for tr in tracks:
+			var c: Vector2 = f.call(tr.box.get_center())
+			tr.box = Rect2(c - tr.box.size / 2.0, tr.box.size)
+
 	func update(dets: Array, t_ms: float) -> Array:
 		var pairs := []
 		for i in tracks.size():
+			var pb := _pred(tracks[i], t_ms)
+			var sz: float = maxf(pb.size.length(), 1.0)
 			for j in dets.size():
 				if tracks[i].c != dets[j].c: continue
-				var v := PELogic.iou(tracks[i].box, dets[j].box)
-				if v > 0.2: pairs.append([v, i, j])
-		pairs.sort_custom(func(a, b): return a[0] > b[0])
+				var cost: float = (1.0 - PELogic.iou(pb, dets[j].box)) + (pb.get_center() - dets[j].box.get_center()).length() / sz
+				if cost < gate: pairs.append([cost, i, j])
+		pairs.sort_custom(func(a, b): return a[0] < b[0])
 		var ut := {}; var ud := {}
 		for p in pairs:
 			if ut.has(p[1]) or ud.has(p[2]): continue
 			ut[p[1]] = true; ud[p[2]] = true
 			var tr: Dictionary = tracks[p[1]]; var d: Dictionary = dets[p[2]]
-			tr.box = Rect2(tr.box.position.lerp(d.box.position, 0.6), tr.box.size.lerp(d.box.size, 0.6))
+			var dt: float = maxf((t_ms - tr.t) / 1000.0, 1e-3)
+			var nv: Vector2 = (d.box.get_center() - tr.box.get_center()) / dt
+			tr.v = tr.v.lerp(nv, 0.5).limit_length(2000.0)
+			tr.box = Rect2(tr.box.position.lerp(d.box.position, 0.7), tr.box.size.lerp(d.box.size, 0.6))
 			tr.s = d.s; tr.t = t_ms; tr.hits += 1
 		for j in dets.size():
 			if ud.has(j): continue
-			tracks.append({"id": next_id, "c": dets[j].c, "box": dets[j].box, "s": dets[j].s, "t": t_ms, "hits": 1})
+			tracks.append({"id": next_id, "c": dets[j].c, "box": dets[j].box, "s": dets[j].s, "t": t_ms, "hits": 1, "v": Vector2.ZERO})
 			next_id += 1
 		tracks = tracks.filter(func(tr): return t_ms - tr.t <= max_miss_ms)
 		return tracks
+
 	func confirmed(t_ms: float) -> Array:
-		return tracks.filter(func(tr): return tr.hits >= confirm_hits and t_ms - tr.t <= 300.0)
+		return tracks.filter(func(tr): return tr.hits >= confirm_hits and t_ms - tr.t <= show_ms)

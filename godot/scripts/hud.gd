@@ -68,6 +68,8 @@ func _status(W: float, H: float, fs: int) -> void:
 	txt(Vector2(24, y), chip, 18, AMBER if mode != "SET" else GREEN)
 	txt(Vector2(W - 424, y), st.get("vision", ""), 18, GREEN, HORIZONTAL_ALIGNMENT_RIGHT, 400)
 	txt(Vector2(W - 424, y + 24), st.get("squad", ""), 18, CYAN, HORIZONTAL_ALIGNMENT_RIGHT, 400)
+	var pt: String = st.get("passthrough", "")
+	txt(Vector2(W - 624, y + 48), pt, 18, GREEN if pt.ends_with("ON") else AMBER, HORIZONTAL_ALIGNMENT_RIGHT, 600)
 	txt(Vector2(24, y + 28), st.get("counts", ""), fs)
 	txt(Vector2(24, y + 52), st.get("clock", ""), 16, DIM)
 
